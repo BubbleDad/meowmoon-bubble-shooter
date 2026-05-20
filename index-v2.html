@@ -38,7 +38,7 @@
 </head>
 <body>
 <canvas id="game" aria-label="Meowmoon Bubble Shooter playable demo"></canvas>
-<audio id="bachMusic" src="audio/jesu-joy-piano-loop.mp3" loop preload="auto"></audio>
+<audio id="bachMusic" src="audio/jesu-joy-piano-loop.mp3" loop preload="auto" playsinline webkit-playsinline></audio>
 
 <script>
 (() => {
@@ -197,6 +197,31 @@
     musicEl: document.getElementById("bachMusic"),
 
     start() {
+      // Mobile browsers are strict about audio. Keep this function synchronous
+      // and call it directly from touch/pointer/mouse/key events.
+      if (this.musicEl && !this.isStarted) {
+        this.musicEl.volume = 0.88;
+        this.musicEl.muted = false;
+        this.musicEl.setAttribute("playsinline", "");
+        this.musicEl.setAttribute("webkit-playsinline", "");
+
+        const playPromise = this.musicEl.play();
+        if (playPromise && typeof playPromise.then === "function") {
+          playPromise
+            .then(() => {
+              this.isStarted = true;
+            })
+            .catch((error) => {
+              // Do not mark audio as started if mobile blocks this attempt.
+              // The next tap will try again instead of silently giving up.
+              console.warn("Music playback blocked or delayed:", error);
+              this.isStarted = false;
+            });
+        } else {
+          this.isStarted = true;
+        }
+      }
+
       if (!this.context) {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         if (AudioContext) {
@@ -207,16 +232,6 @@
       if (this.context && this.context.state === "suspended") {
         this.context.resume().catch(() => {});
       }
-
-      if (this.musicEl && !this.isStarted) {
-        this.musicEl.volume = 0.88;
-        this.musicEl.currentTime = this.musicEl.currentTime || 0;
-        this.musicEl.play().catch(() => {
-          // If a browser blocks playback despite the tap, gameplay still works.
-        });
-      }
-
-      this.isStarted = true;
     },
 
     playEffectNote(freq, at, duration, gainValue) {
@@ -262,6 +277,18 @@
       });
     }
   };
+
+
+  function unlockAudioFromUserGesture() {
+    audio.start();
+  }
+
+  ["pointerdown", "touchstart", "mousedown", "keydown"].forEach((eventName) => {
+    window.addEventListener(eventName, unlockAudioFromUserGesture, {
+      capture: true,
+      passive: true
+    });
+  });
 
   /***************************************************************************
    * 5. Game state
