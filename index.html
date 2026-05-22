@@ -38,6 +38,7 @@
 </head>
 <body>
 <canvas id="game" aria-label="Meowmoon Bubble Shooter playable demo"></canvas>
+<audio id="bachMusic" src="audio/jesu-joy-piano-loop.mp3" loop preload="auto" playsinline webkit-playsinline></audio>
 
 <script>
 (() => {
@@ -55,6 +56,7 @@
   const TITLE_HOLD_MS = 2000;
   const TITLE_FADE_MS = 850;
   const CELEBRATION_MS = 3000;
+  const AUTO_PAUSE_GRACE_MS = 500;
   const SHOT_SPEED = 1120; // CSS pixels per second; medium arcade speed on Fire tablets.
   const MAX_COLORS_ON_SCREEN = 4;
 
@@ -182,51 +184,67 @@
   window.addEventListener("orientationchange", () => setTimeout(resize, 150), { passive: true });
 
   /***************************************************************************
-   * 4. Audio engine: Web Audio now, file-audio upgrade path later
+   * 4. Audio engine: realistic piano file now, Web Audio effects preserved
+   *
+   * Music is loaded from audio/jesu-joy-piano-loop.mp3. The first tap-to-shoot
+   * starts playback, because mobile browsers usually require a user gesture
+   * before audio can play. Pop and celebration effects still use compact
+   * generated Web Audio notes so the only external asset is the Bach piano file.
    ***************************************************************************/
 
   const audio = {
     context: null,
-    musicTimer: null,
-    noteIndex: 0,
     isStarted: false,
-    nextMusicAt: 0,
-    pattern: [523.25, 659.25, 783.99, 659.25, 587.33, 739.99, 880.00, 739.99, 659.25, 783.99, 1046.50, 783.99],
+    musicEl: document.getElementById("bachMusic"),
 
     start() {
-      if (this.isStarted) return;
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContext) return;
+      // Mobile browsers are strict about audio. Keep this function synchronous
+      // and call it directly from touch/pointer/mouse/key events.
+      if (this.musicEl && (!this.isStarted || this.musicEl.paused)) {
+        this.musicEl.volume = 0.88;
+        this.musicEl.muted = false;
+        this.musicEl.setAttribute("playsinline", "");
+        this.musicEl.setAttribute("webkit-playsinline", "");
 
-      this.context = new AudioContext();
-      this.isStarted = true;
-      this.noteIndex = 0;
-      this.nextMusicAt = this.context.currentTime + 0.03;
+        const playPromise = this.musicEl.play();
+        if (playPromise && typeof playPromise.then === "function") {
+          playPromise
+            .then(() => {
+              this.isStarted = true;
+            })
+            .catch((error) => {
+              // Do not mark audio as started if mobile blocks this attempt.
+              // The next tap will try again instead of silently giving up.
+              console.warn("Music playback blocked or delayed:", error);
+              this.isStarted = false;
+            });
+        } else {
+          this.isStarted = true;
+        }
+      }
 
-      if (this.context.state === "suspended") {
+      if (!this.context) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (AudioContext) {
+          this.context = new AudioContext();
+        }
+      }
+
+      if (this.context && this.context.state === "suspended") {
         this.context.resume().catch(() => {});
       }
-
-      this.scheduleMusic();
-      this.musicTimer = window.setInterval(() => this.scheduleMusic(), 250);
     },
 
-    scheduleMusic() {
-      if (!this.context) return;
-      const ctxAudio = this.context;
-      const lookAhead = ctxAudio.currentTime + 1.3;
-      while (this.nextMusicAt < lookAhead) {
-        const freq = this.pattern[this.noteIndex % this.pattern.length];
-        this.playPianoNote(freq, this.nextMusicAt, 0.26, 0.15);
-        if (this.noteIndex % 4 === 0) {
-          this.playPianoNote(freq / 2, this.nextMusicAt, 0.33, 0.075);
-        }
-        this.noteIndex += 1;
-        this.nextMusicAt += 0.285;
+    pause() {
+      if (this.musicEl && !this.musicEl.paused) {
+        this.musicEl.pause();
+      }
+      if (this.context && this.context.state === "running") {
+        this.context.suspend().catch(() => {});
       }
     },
 
-    playPianoNote(freq, at, duration, gainValue) {
+    playEffectNote(freq, at, duration, gainValue) {
       if (!this.context) return;
       const ctxAudio = this.context;
       const osc = ctxAudio.createOscillator();
@@ -238,11 +256,11 @@
       osc.frequency.exponentialRampToValueAtTime(freq * 0.998, at + duration);
 
       filter.type = "lowpass";
-      filter.frequency.setValueAtTime(2100, at);
+      filter.frequency.setValueAtTime(2400, at);
       filter.frequency.exponentialRampToValueAtTime(900, at + duration);
 
       gain.gain.setValueAtTime(0.0001, at);
-      gain.gain.exponentialRampToValueAtTime(gainValue, at + 0.012);
+      gain.gain.exponentialRampToValueAtTime(gainValue, at + 0.01);
       gain.gain.exponentialRampToValueAtTime(0.0001, at + duration);
 
       osc.connect(filter);
@@ -257,7 +275,7 @@
       const at = this.context.currentTime;
       const tones = [740, 880, 988, 1175];
       for (let i = 0; i < Math.min(6, count); i += 1) {
-        this.playPianoNote(tones[i % tones.length], at + i * 0.025, 0.12, 0.06);
+        this.playEffectNote(tones[i % tones.length], at + i * 0.025, 0.12, 0.055);
       }
     },
 
@@ -265,10 +283,22 @@
       if (!this.context) return;
       const at = this.context.currentTime;
       [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
-        this.playPianoNote(freq, at + i * 0.09, 0.35, 0.13);
+        this.playEffectNote(freq, at + i * 0.09, 0.35, 0.12);
       });
     }
   };
+
+
+  function unlockAudioFromUserGesture() {
+    audio.start();
+  }
+
+  ["pointerdown", "touchstart", "mousedown", "keydown"].forEach((eventName) => {
+    window.addEventListener(eventName, unlockAudioFromUserGesture, {
+      capture: true,
+      passive: true
+    });
+  });
 
   /***************************************************************************
    * 5. Game state
@@ -291,7 +321,12 @@
     shot: null,
     pops: [],
     particles: [],
-    boardSeed: 1
+    boardSeed: 1,
+    isPaused: false,
+    pauseReason: "",
+    pausedAt: 0,
+    celebrationRestartTimer: null,
+    celebrationRemainingMs: CELEBRATION_MS
   };
 
   /***************************************************************************
@@ -449,6 +484,12 @@
    ***************************************************************************/
 
   function startNewDemoLevel() {
+    if (game.celebrationRestartTimer) {
+      window.clearTimeout(game.celebrationRestartTimer);
+      game.celebrationRestartTimer = null;
+    }
+    game.isPaused = false;
+    game.pauseReason = "";
     game.grid.clear();
     game.pops = [];
     game.particles = [];
@@ -648,7 +689,71 @@
   }
 
   /***************************************************************************
-   * 9. Input handling
+   * 9. Automatic pause / resume
+   ***************************************************************************/
+
+  let autoPauseTimer = null;
+
+  function clearAutoPauseTimer() {
+    if (autoPauseTimer) {
+      window.clearTimeout(autoPauseTimer);
+      autoPauseTimer = null;
+    }
+  }
+
+  function scheduleAutoPause(reason = "visibility") {
+    clearAutoPauseTimer();
+    autoPauseTimer = window.setTimeout(() => {
+      autoPauseTimer = null;
+      if (document.hidden || reason === "pagehide") {
+        pauseGame(reason);
+      }
+    }, AUTO_PAUSE_GRACE_MS);
+  }
+
+  function pauseGame(reason = "visibility") {
+    if (game.isPaused) return;
+    game.isPaused = true;
+    game.pauseReason = reason;
+    game.pausedAt = nowMs();
+    audio.pause();
+
+    if (game.phase === "celebration" && game.celebrationRestartTimer) {
+      const elapsed = game.pausedAt - game.celebrationStartedAt;
+      game.celebrationRemainingMs = clamp(CELEBRATION_MS - elapsed, 250, CELEBRATION_MS);
+      window.clearTimeout(game.celebrationRestartTimer);
+      game.celebrationRestartTimer = null;
+    }
+  }
+
+  function resumeGame() {
+    if (!game.isPaused) return;
+    clearAutoPauseTimer();
+    game.isPaused = false;
+    game.pauseReason = "";
+    lastFrame = nowMs();
+    audio.start();
+
+    if (game.phase === "celebration" && !game.celebrationRestartTimer) {
+      game.celebrationStartedAt = nowMs() - (CELEBRATION_MS - game.celebrationRemainingMs);
+      game.celebrationRestartTimer = window.setTimeout(() => {
+        game.celebrationRestartTimer = null;
+        startNewDemoLevel();
+      }, game.celebrationRemainingMs);
+    }
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) scheduleAutoPause("visibility");
+    else clearAutoPauseTimer();
+  }, { passive: true });
+
+  window.addEventListener("pagehide", () => {
+    scheduleAutoPause("pagehide");
+  }, { passive: true });
+
+  /***************************************************************************
+   * 10. Input handling
    ***************************************************************************/
 
   function pointerToGame(evt) {
@@ -661,6 +766,10 @@
 
   function onPointerDown(evt) {
     evt.preventDefault();
+    if (game.isPaused) {
+      resumeGame();
+      return;
+    }
     const titleAlpha = currentTitleAlpha(nowMs());
     if (titleAlpha > 0.12) return;
     if (game.phase !== "playing" || game.shot) return;
@@ -837,7 +946,9 @@
       });
     }
 
-    window.setTimeout(() => {
+    game.celebrationRemainingMs = CELEBRATION_MS;
+    game.celebrationRestartTimer = window.setTimeout(() => {
+      game.celebrationRestartTimer = null;
       startNewDemoLevel();
     }, CELEBRATION_MS);
   }
@@ -1287,6 +1398,139 @@
     ctx.restore();
   }
 
+  function drawPauseCat(cx, cy, size) {
+    const s = size;
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    // Raised paws.
+    ctx.strokeStyle = "#b74f18";
+    ctx.lineWidth = s * 0.14;
+    ctx.beginPath();
+    ctx.moveTo(cx - s * 0.42, cy + s * 0.15);
+    ctx.quadraticCurveTo(cx - s * 0.95, cy - s * 0.28, cx - s * 0.72, cy - s * 0.78);
+    ctx.moveTo(cx + s * 0.42, cy + s * 0.15);
+    ctx.quadraticCurveTo(cx + s * 0.95, cy - s * 0.28, cx + s * 0.72, cy - s * 0.78);
+    ctx.stroke();
+
+    ctx.fillStyle = "#ffbd63";
+    ctx.strokeStyle = "#b74f18";
+    ctx.lineWidth = s * 0.045;
+    ctx.beginPath();
+    ctx.ellipse(cx - s * 0.74, cy - s * 0.82, s * 0.20, s * 0.24, -0.25, 0, TAU);
+    ctx.ellipse(cx + s * 0.74, cy - s * 0.82, s * 0.20, s * 0.24, 0.25, 0, TAU);
+    ctx.fill();
+    ctx.stroke();
+
+    // Body and head.
+    const bodyGrad = ctx.createRadialGradient(cx - s * 0.18, cy - s * 0.18, s * 0.2, cx, cy, s * 1.1);
+    bodyGrad.addColorStop(0, "#ffbd63");
+    bodyGrad.addColorStop(1, "#f07b28");
+    ctx.fillStyle = bodyGrad;
+    ctx.strokeStyle = "#b74f18";
+    ctx.lineWidth = s * 0.055;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + s * 0.24, s * 0.55, s * 0.68, 0, 0, TAU);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(cx, cy - s * 0.52, s * 0.55, 0, TAU);
+    ctx.fill();
+    ctx.stroke();
+
+    // Ears.
+    ctx.fillStyle = "#f07b28";
+    ctx.beginPath();
+    ctx.moveTo(cx - s * 0.42, cy - s * 0.83);
+    ctx.lineTo(cx - s * 0.25, cy - s * 1.35);
+    ctx.lineTo(cx - s * 0.03, cy - s * 0.86);
+    ctx.closePath();
+    ctx.moveTo(cx + s * 0.42, cy - s * 0.83);
+    ctx.lineTo(cx + s * 0.25, cy - s * 1.35);
+    ctx.lineTo(cx + s * 0.03, cy - s * 0.86);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Tabby stripes.
+    ctx.strokeStyle = "#b84e18";
+    ctx.lineWidth = s * 0.045;
+    for (const offset of [-0.22, 0, 0.22]) {
+      ctx.beginPath();
+      ctx.moveTo(cx + offset * s, cy - s * 1.02);
+      ctx.lineTo(cx + offset * s * 0.65, cy - s * 0.78);
+      ctx.stroke();
+    }
+
+    // Smile and face.
+    ctx.fillStyle = "#2d1a12";
+    ctx.beginPath();
+    ctx.arc(cx - s * 0.2, cy - s * 0.56, s * 0.055, 0, TAU);
+    ctx.arc(cx + s * 0.2, cy - s * 0.56, s * 0.055, 0, TAU);
+    ctx.fill();
+
+    ctx.fillStyle = "#ffe6ce";
+    ctx.beginPath();
+    ctx.ellipse(cx, cy - s * 0.33, s * 0.22, s * 0.15, 0, 0, TAU);
+    ctx.fill();
+
+    ctx.fillStyle = "#65301c";
+    ctx.beginPath();
+    ctx.arc(cx, cy - s * 0.39, s * 0.045, 0, TAU);
+    ctx.fill();
+
+    ctx.strokeStyle = "#65301c";
+    ctx.lineWidth = s * 0.035;
+    ctx.beginPath();
+    ctx.arc(cx - s * 0.06, cy - s * 0.32, s * 0.13, 0.15 * Math.PI, 0.9 * Math.PI);
+    ctx.arc(cx + s * 0.06, cy - s * 0.32, s * 0.13, 0.1 * Math.PI, 0.85 * Math.PI);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawPauseOverlay() {
+    if (!game.isPaused) return;
+
+    ctx.save();
+    ctx.fillStyle = "rgba(25, 48, 90, 0.46)";
+    ctx.fillRect(0, 0, view.w, view.h);
+
+    const cardW = Math.min(view.w * 0.86, 720);
+    const cardH = Math.min(view.h * 0.52, 520);
+    const cardX = (view.w - cardW) / 2;
+    const cardY = view.h * 0.23;
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    ctx.strokeStyle = "rgba(56, 98, 180, 0.35)";
+    ctx.lineWidth = Math.max(3, view.w * 0.006);
+    roundRect(ctx, cardX, cardY, cardW, cardH, Math.max(24, cardW * 0.045));
+    ctx.fill();
+    ctx.stroke();
+
+    drawPauseCat(view.w / 2, cardY + cardH * 0.36, Math.min(cardW * 0.17, cardH * 0.22));
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#254a9a";
+    const fontSize = clamp(cardW * 0.055, 22, 42);
+    ctx.font = `900 ${fontSize}px system-ui, -apple-system, Segoe UI, sans-serif`;
+
+    const lines = [
+      "The game is paused.",
+      "Meowmoon wants to play",
+      "with you again soon"
+    ];
+    const startY = cardY + cardH * 0.70;
+    for (let i = 0; i < lines.length; i += 1) {
+      ctx.fillText(lines[i], view.w / 2, startY + i * fontSize * 1.18);
+    }
+
+    ctx.restore();
+  }
+
   /***************************************************************************
    * 13. Main update/render loop
    ***************************************************************************/
@@ -1294,6 +1538,11 @@
   let lastFrame = nowMs();
 
   function update(current) {
+    if (game.isPaused) {
+      lastFrame = current;
+      return;
+    }
+
     const dt = clamp((current - lastFrame) / 1000, 0, 0.033);
     lastFrame = current;
 
@@ -1306,17 +1555,19 @@
   }
 
   function render(current) {
+    const renderTime = game.isPaused ? game.pausedAt : current;
     drawBackground();
     drawBoard();
     drawAimGuide();
-    drawPops(current);
-    drawParticles(current);
+    drawPops(renderTime);
+    drawParticles(renderTime);
     drawCat();
     drawCannon();
     if (!game.shot && game.phase !== "celebration") drawLoadedBubble();
     drawShot();
-    drawCelebration(current);
-    drawTitleOverlay(current);
+    drawCelebration(renderTime);
+    drawTitleOverlay(renderTime);
+    drawPauseOverlay();
   }
 
   function loop(current) {
