@@ -212,58 +212,250 @@
   const audio = {
     context: null,
     isStarted: false,
+    hasUserGesture: false,
     musicEl: document.getElementById("bachMusic"),
+    musicMode: "",
+    htmlCheckTimer: null,
+    fallbackBuffer: null,
+    fallbackBufferPromise: null,
+    fallbackSource: null,
+    fallbackGain: null,
+    webAudioStartedAt: 0,
+    webAudioOffset: 0,
 
-    start() {
-      // Mobile browsers are strict about audio. Keep this function synchronous
-      // and call it directly from touch/pointer/mouse/key events.
-      if (this.musicEl && (!this.isStarted || this.musicEl.paused)) {
-        this.musicEl.volume = 0.88;
-        this.musicEl.muted = false;
-        this.musicEl.setAttribute("playsinline", "");
-        this.musicEl.setAttribute("webkit-playsinline", "");
-
-        const playPromise = this.musicEl.play();
-        if (playPromise && typeof playPromise.then === "function") {
-          playPromise
-            .then(() => {
-              this.isStarted = true;
-            })
-            .catch((error) => {
-              // Do not mark audio as started if mobile blocks this attempt.
-              // The next tap will try again instead of silently giving up.
-              console.warn("Music playback blocked or delayed:", error);
-              this.isStarted = false;
-            });
-        } else {
-          this.isStarted = true;
-        }
-      }
-
+    ensureContext() {
       if (!this.context) {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         if (AudioContext) {
           this.context = new AudioContext();
         }
       }
+      return this.context;
+    },
 
-      if (this.context && this.context.state === "suspended") {
-        this.context.resume().catch(() => {});
+    resumeContext() {
+      const ctxAudio = this.ensureContext();
+      if (ctxAudio && ctxAudio.state === "suspended") {
+        return ctxAudio.resume().catch(() => {});
+      }
+      return Promise.resolve();
+    },
+
+    playSilentUnlockPulse() {
+      const ctxAudio = this.ensureContext();
+      if (!ctxAudio) return;
+      try {
+        const osc = ctxAudio.createOscillator();
+        const gain = ctxAudio.createGain();
+        gain.gain.setValueAtTime(0.00001, ctxAudio.currentTime);
+        osc.frequency.setValueAtTime(220, ctxAudio.currentTime);
+        osc.connect(gain);
+        gain.connect(ctxAudio.destination);
+        osc.start(ctxAudio.currentTime);
+        osc.stop(ctxAudio.currentTime + 0.035);
+      } catch (error) {
+        console.warn("Silent audio unlock pulse failed:", error);
       }
     },
 
+    start() {
+      // Mobile browsers are strict about audio. This method is intentionally
+      // called from multiple direct user gestures. Fire/Silk can be stricter
+      // than desktop browsers, so v0.3 adds a Web Audio MP3 fallback if the
+      // normal HTML audio element remains paused after a tap.
+      this.hasUserGesture = true;
+      this.resumeContext();
+      this.playSilentUnlockPulse();
+
+      this.tryHtmlMusic();
+      this.loadFallbackBuffer();
+      this.scheduleFallbackCheck();
+    },
+
+    tryHtmlMusic() {
+      if (!this.musicEl || this.musicMode === "webaudio") return;
+
+      this.musicEl.volume = 0.88;
+      this.musicEl.muted = false;
+      this.musicEl.defaultMuted = false;
+      this.musicEl.setAttribute("playsinline", "");
+      this.musicEl.setAttribute("webkit-playsinline", "");
+      this.musicEl.setAttribute("preload", "auto");
+
+      try {
+        const playPromise = this.musicEl.play();
+        if (playPromise && typeof playPromise.then === "function") {
+          playPromise
+            .then(() => {
+              this.isStarted = true;
+              this.musicMode = "html";
+              this.stopFallbackSource(false);
+            })
+            .catch((error) => {
+              // Do not mark audio as started if mobile blocks this attempt.
+              // The next tap will try again, and the Web Audio fallback will
+              // also be prepared in the background.
+              console.warn("HTML music playback blocked or delayed:", error);
+              this.isStarted = false;
+              this.startFallbackMusicWhenReady();
+            });
+        } else {
+          this.isStarted = true;
+          this.musicMode = "html";
+        }
+      } catch (error) {
+        console.warn("HTML music playback failed:", error);
+        this.isStarted = false;
+        this.startFallbackMusicWhenReady();
+      }
+    },
+
+    scheduleFallbackCheck() {
+      if (this.htmlCheckTimer) window.clearTimeout(this.htmlCheckTimer);
+      this.htmlCheckTimer = window.setTimeout(() => {
+        this.htmlCheckTimer = null;
+        if (!this.hasUserGesture) return;
+        const htmlIsPlaying = this.musicEl && !this.musicEl.paused && !this.musicEl.ended;
+        if (!htmlIsPlaying && this.musicMode !== "webaudio") {
+          this.startFallbackMusicWhenReady();
+        }
+      }, 900);
+    },
+
+    loadFallbackBuffer() {
+      if (this.fallbackBuffer) return Promise.resolve(this.fallbackBuffer);
+      if (this.fallbackBufferPromise) return this.fallbackBufferPromise;
+
+      const ctxAudio = this.ensureContext();
+      if (!ctxAudio || !this.musicEl) return Promise.resolve(null);
+
+      const sourceUrl = this.musicEl.getAttribute("src") || "audio/jesu-joy-piano-loop.mp3";
+      this.fallbackBufferPromise = fetch(sourceUrl)
+        .then((response) => {
+          if (!response.ok) throw new Error("Could not fetch music file for Web Audio fallback.");
+          return response.arrayBuffer();
+        })
+        .then((arrayBuffer) => this.decodeAudioDataCompat(ctxAudio, arrayBuffer))
+        .then((buffer) => {
+          this.fallbackBuffer = buffer;
+          return buffer;
+        })
+        .catch((error) => {
+          console.warn("Web Audio music fallback could not be prepared:", error);
+          return null;
+        });
+
+      return this.fallbackBufferPromise;
+    },
+
+    decodeAudioDataCompat(ctxAudio, arrayBuffer) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const done = (buffer) => {
+          if (!settled) {
+            settled = true;
+            resolve(buffer);
+          }
+        };
+        const fail = (error) => {
+          if (!settled) {
+            settled = true;
+            reject(error);
+          }
+        };
+        try {
+          const maybePromise = ctxAudio.decodeAudioData(arrayBuffer, done, fail);
+          if (maybePromise && typeof maybePromise.then === "function") {
+            maybePromise.then(done).catch(fail);
+          }
+        } catch (error) {
+          fail(error);
+        }
+      });
+    },
+
+    startFallbackMusicWhenReady() {
+      if (!this.hasUserGesture) return;
+      this.resumeContext();
+      this.loadFallbackBuffer().then((buffer) => {
+        if (!buffer || !this.hasUserGesture) return;
+        const htmlIsPlaying = this.musicEl && !this.musicEl.paused && !this.musicEl.ended;
+        if (!htmlIsPlaying) {
+          this.startWebAudioMusic();
+        }
+      });
+    },
+
+    startWebAudioMusic() {
+      const ctxAudio = this.ensureContext();
+      if (!ctxAudio || !this.fallbackBuffer || this.fallbackSource) return;
+
+      if (!this.fallbackGain) {
+        this.fallbackGain = ctxAudio.createGain();
+        this.fallbackGain.gain.setValueAtTime(0.88, ctxAudio.currentTime);
+        this.fallbackGain.connect(ctxAudio.destination);
+      }
+
+      try {
+        if (this.musicEl && !this.musicEl.paused) {
+          this.musicEl.pause();
+        }
+        const source = ctxAudio.createBufferSource();
+        source.buffer = this.fallbackBuffer;
+        source.loop = true;
+        source.connect(this.fallbackGain);
+        const offset = this.fallbackBuffer.duration
+          ? (this.webAudioOffset % this.fallbackBuffer.duration)
+          : 0;
+        source.start(0, offset);
+        this.fallbackSource = source;
+        this.webAudioStartedAt = ctxAudio.currentTime;
+        this.isStarted = true;
+        this.musicMode = "webaudio";
+        source.onended = () => {
+          if (this.fallbackSource === source) {
+            this.fallbackSource = null;
+          }
+        };
+      } catch (error) {
+        console.warn("Web Audio music fallback failed to start:", error);
+      }
+    },
+
+    stopFallbackSource(updateOffset = true) {
+      if (!this.fallbackSource) return;
+      const ctxAudio = this.context;
+      if (updateOffset && ctxAudio && this.fallbackBuffer) {
+        const elapsed = Math.max(0, ctxAudio.currentTime - this.webAudioStartedAt);
+        this.webAudioOffset = (this.webAudioOffset + elapsed) % this.fallbackBuffer.duration;
+      }
+      try {
+        this.fallbackSource.onended = null;
+        this.fallbackSource.stop(0);
+      } catch (error) {
+        // Source may already have stopped; that is harmless.
+      }
+      this.fallbackSource = null;
+    },
+
     pause() {
+      if (this.htmlCheckTimer) {
+        window.clearTimeout(this.htmlCheckTimer);
+        this.htmlCheckTimer = null;
+      }
       if (this.musicEl && !this.musicEl.paused) {
         this.musicEl.pause();
       }
+      this.stopFallbackSource(true);
+      this.isStarted = false;
       if (this.context && this.context.state === "running") {
         this.context.suspend().catch(() => {});
       }
     },
 
     playEffectNote(freq, at, duration, gainValue) {
-      if (!this.context) return;
-      const ctxAudio = this.context;
+      const ctxAudio = this.ensureContext();
+      if (!ctxAudio || ctxAudio.state !== "running") return;
       const osc = ctxAudio.createOscillator();
       const gain = ctxAudio.createGain();
       const filter = ctxAudio.createBiquadFilter();
@@ -288,8 +480,9 @@
     },
 
     pop(count = 1) {
-      if (!this.context) return;
-      const at = this.context.currentTime;
+      const ctxAudio = this.ensureContext();
+      if (!ctxAudio || ctxAudio.state !== "running") return;
+      const at = ctxAudio.currentTime;
       const tones = [740, 880, 988, 1175];
       for (let i = 0; i < Math.min(6, count); i += 1) {
         this.playEffectNote(tones[i % tones.length], at + i * 0.025, 0.12, 0.075);
@@ -297,8 +490,9 @@
     },
 
     celebrate() {
-      if (!this.context) return;
-      const at = this.context.currentTime;
+      const ctxAudio = this.ensureContext();
+      if (!ctxAudio || ctxAudio.state !== "running") return;
+      const at = ctxAudio.currentTime;
       [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
         this.playEffectNote(freq, at + i * 0.09, 0.35, 0.12);
       });
@@ -310,7 +504,7 @@
     audio.start();
   }
 
-  ["pointerdown", "touchstart", "mousedown", "keydown"].forEach((eventName) => {
+  ["pointerdown", "pointerup", "touchstart", "touchend", "mousedown", "mouseup", "click", "keydown"].forEach((eventName) => {
     window.addEventListener(eventName, unlockAudioFromUserGesture, {
       capture: true,
       passive: true
