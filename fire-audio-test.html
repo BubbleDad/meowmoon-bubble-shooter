@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Meowmoon Fire Audio Test v0.7</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; padding: 18px; background: #eaf8ff; color: #123; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  h2 { font-size: 18px; margin: 22px 0 8px; }
+  p { line-height: 1.35; }
+  button, a.testlink { display: block; width: 100%; box-sizing: border-box; margin: 10px 0; padding: 16px; border-radius: 12px; border: 2px solid #245; background: #fff; font-size: 17px; text-align: left; color: #123; text-decoration: none; }
+  audio, video { display: block; width: 100%; margin: 10px 0 18px; background: #fff; border-radius: 10px; }
+  video { height: 72px; }
+  #log { margin-top: 14px; padding: 10px; background: #fff; border: 1px solid #9bd; border-radius: 10px; white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; max-height: 45vh; overflow: auto; }
+  .note { background: #fff8d6; border-left: 5px solid #e5b900; padding: 10px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1>Meowmoon Fire Audio Test v0.7</h1>
+<p class="note"><b>Purpose:</b> v0.6 showed that Fire/Silk reports in-page audio as playing, but no sound comes out. This page tests native controls and an MP4 video-container fallback. Please try both the big buttons and the native controls.</p>
+
+<h2>1. JavaScript playback tests</h2>
+<button id="btnWeb">Try Web Audio loud tone</button>
+<button id="btnAudio">Try local MP3 through JavaScript</button>
+<button id="btnVideo">Try Bach music through MP4 video container</button>
+<button id="btnRemote">Try remote SampleLib MP3 through JavaScript</button>
+
+<h2>2. Native controls tests</h2>
+<p>Tap the play triangle inside each native control. This tests whether Silk will play media when its own built-in controls are used.</p>
+<p><b>Local MP3 native controls</b></p>
+<audio id="nativeMp3" controls preload="metadata" src="audio/jesu-joy-piano-loop-v07.mp3"></audio>
+<p><b>MP4 video-container native controls</b></p>
+<video id="nativeVideo" controls preload="metadata" playsinline webkit-playsinline src="audio/jesu-joy-piano-loop-v07-audio-video.mp4"></video>
+<p><b>Remote SampleLib native controls</b></p>
+<audio id="nativeRemote" controls preload="metadata" src="https://samplelib.com/lib/preview/mp3/sample-3s.mp3"></audio>
+
+<h2>3. Direct-open tests</h2>
+<a class="testlink" href="audio/jesu-joy-piano-loop-v07.mp3" target="_blank" rel="noopener">Open local Bach MP3 directly</a>
+<a class="testlink" href="audio/jesu-joy-piano-loop-v07-audio-video.mp4" target="_blank" rel="noopener">Open local Bach MP4 video-container directly</a>
+<a class="testlink" href="https://samplelib.com/lib/preview/mp3/sample-3s.mp3" target="_blank" rel="noopener">Open SampleLib MP3 directly</a>
+
+<h2>Log</h2>
+<div id="log"></div>
+
+<audio id="jsAudio" preload="auto" src="audio/jesu-joy-piano-loop-v07.mp3"></audio>
+<audio id="jsRemote" preload="auto" src="https://samplelib.com/lib/preview/mp3/sample-3s.mp3"></audio>
+<video id="jsVideo" preload="auto" playsinline webkit-playsinline loop style="position:absolute;left:-9999px;width:16px;height:16px;opacity:.01" src="audio/jesu-joy-piano-loop-v07-audio-video.mp4"></video>
+
+<script>
+(function(){
+  const logEl = document.getElementById('log');
+  const stamp = () => new Date().toLocaleTimeString();
+  function log(msg){ logEl.textContent += `${stamp()}  ${msg}\n`; logEl.scrollTop = logEl.scrollHeight; }
+  log(`Ready. userAgent=${navigator.userAgent}`);
+  const probe = document.createElement('audio');
+  log(`canPlayType mp3=${probe.canPlayType('audio/mpeg') || '(empty)'}`);
+  log(`canPlayType mp4/aac=${probe.canPlayType('audio/mp4; codecs="mp4a.40.2"') || '(empty)'}`);
+  log(`canPlayType ogg=${probe.canPlayType('audio/ogg; codecs="vorbis"') || '(empty)'}`);
+  const vprobe = document.createElement('video');
+  log(`video canPlayType mp4/h264+aac=${vprobe.canPlayType('video/mp4; codecs="avc1.42E01E, mp4a.40.2"') || '(empty)'}`);
+
+  async function playEl(label, el){
+    log(`Gesture received for ${label}.`);
+    try { el.pause(); el.currentTime = 0; } catch(e) {}
+    el.volume = 1; el.muted = false; el.defaultMuted = false;
+    try {
+      const p = el.play();
+      if (p && typeof p.then === 'function') await p;
+      log(`${label} play() resolved. paused=${el.paused} currentTime=${el.currentTime.toFixed(2)} readyState=${el.readyState} networkState=${el.networkState} volume=${el.volume} muted=${el.muted}`);
+    } catch(e) {
+      log(`${label} play() rejected: ${e.name}: ${e.message}`);
+    }
+    setTimeout(() => {
+      log(`${label} after 1500ms: paused=${el.paused} currentTime=${el.currentTime.toFixed(2)} readyState=${el.readyState} networkState=${el.networkState} volume=${el.volume} muted=${el.muted}`);
+    }, 1500);
+  }
+
+  document.getElementById('btnAudio').addEventListener('click', () => playEl('Local MP3 JS', document.getElementById('jsAudio')));
+  document.getElementById('btnVideo').addEventListener('click', () => playEl('Local MP4 video-container JS', document.getElementById('jsVideo')));
+  document.getElementById('btnRemote').addEventListener('click', () => playEl('Remote SampleLib MP3 JS', document.getElementById('jsRemote')));
+  document.getElementById('btnWeb').addEventListener('click', async () => {
+    log('Gesture received for Web Audio tone.');
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ac = window._meowAudioCtx || new AC();
+      window._meowAudioCtx = ac;
+      if (ac.state === 'suspended') await ac.resume();
+      const osc = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.type = 'square';
+      osc.frequency.value = 880;
+      gain.gain.value = 0.8;
+      osc.connect(gain); gain.connect(ac.destination);
+      osc.start(); osc.stop(ac.currentTime + 1.25);
+      log(`Web Audio tone attempted. state=${ac.state} destination channels=${ac.destination.maxChannelCount || 'unknown'}`);
+    } catch(e) { log(`Web Audio failed: ${e.name}: ${e.message}`); }
+  });
+})();
+</script>
+</body>
+</html>
