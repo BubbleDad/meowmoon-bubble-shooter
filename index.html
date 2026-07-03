@@ -3,11 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <title>Meowmoon Bubble Shooter Demo v0.11.2</title>
+  <title>Meowmoon Bubble Shooter Demo v0.11.3</title>
   <style>
     :root {
       color-scheme: light;
-      --safe-bottom: env(safe-area-inset-bottom, 0px);
     }
 
     * {
@@ -45,6 +44,12 @@
   "use strict";
 
   /***************************************************************************
+   * v0.11.3 maintenance: removed unused state/constants and redundant stored
+   * metadata; gameplay rules, board generation, timing, and audio assets are
+   * unchanged from v0.11.2.
+   ***************************************************************************/
+
+  /***************************************************************************
    * 1. Configuration constants
    ***************************************************************************/
 
@@ -52,7 +57,6 @@
   const ctx = canvas.getContext("2d", { alpha: false });
 
   const TAU = Math.PI * 2;
-  const SQRT3 = Math.sqrt(3);
   const TITLE_HOLD_MS = 2000;
   const TITLE_FADE_MS = 850;
   const CELEBRATION_MS = 3000;
@@ -125,7 +129,6 @@
   };
 
   const layout = {
-    topPad: 76,
     boardLeft: 24,
     boardTop: 82,
     maxCols: 7,
@@ -305,34 +308,6 @@
     }
   };
 
-  function safePop(count = 1) {
-    try {
-      audio.pop(count);
-    } catch (error) {
-      console.warn("Pop sound failed without stopping game:", error);
-    }
-  }
-
-  function safeCelebrateSound() {
-    try {
-      safeCelebrateSound();
-    } catch (error) {
-      console.warn("Celebration sound failed without stopping game:", error);
-    }
-  }
-
-  function clearFinalCascadeTimers() {
-    if (game.finalCascadeTimer) {
-      window.clearTimeout(game.finalCascadeTimer);
-      game.finalCascadeTimer = null;
-    }
-    if (game.finalCascadeFallbackTimer) {
-      window.clearTimeout(game.finalCascadeFallbackTimer);
-      game.finalCascadeFallbackTimer = null;
-    }
-    game.finalCascadeStartedAt = 0;
-  }
-
 
   function unlockAudioFromUserGesture() {
     audio.start();
@@ -367,13 +342,10 @@
     shot: null,
     pops: [],
     particles: [],
-    boardSeed: 1,
     isPaused: false,
-    pauseReason: "",
     pausedAt: 0,
     celebrationRestartTimer: null,
-    celebrationRemainingMs: CELEBRATION_MS,
-    caregiverPauseStartedAt: 0
+    celebrationRemainingMs: CELEBRATION_MS
   };
 
   /***************************************************************************
@@ -535,9 +507,7 @@
       window.clearTimeout(game.celebrationRestartTimer);
       game.celebrationRestartTimer = null;
     }
-    clearFinalCascadeTimers();
     game.isPaused = false;
-    game.pauseReason = "";
     game.grid.clear();
     game.pops = [];
     game.particles = [];
@@ -549,7 +519,6 @@
     game.badShotStreak = 0;
     game.shotGoal = randInt(9, 13);
     game.boardRows = 8;
-    game.boardSeed += 1;
 
     const activeCount = Math.random() < 0.45 ? 3 : MAX_COLORS_ON_SCREEN;
     game.activeColors = BUBBLE_COLORS.slice(0, activeCount);
@@ -624,11 +593,8 @@
         candidates.push({
           row,
           col,
-          color,
           point: p,
-          matchCount,
           adjacentSame,
-          floatingCount,
           priority,
           isImmediateMatch: matchCount >= 3
         });
@@ -723,7 +689,7 @@
 
       // Primary sort is closest to where the child aimed. Priority breaks ties.
       const aimBucket = Math.floor(bestAimScore * 24);
-      scored.push({ ...candidate, path: bestPath, aimScore: bestAimScore, aimBucket });
+      scored.push({ ...candidate, path: bestPath, aimBucket });
     }
 
     if (!scored.length) return null;
@@ -758,7 +724,6 @@
       caregiverPauseTimer = null;
     }
     caregiverPausePointerId = null;
-    game.caregiverPauseStartedAt = 0;
   }
 
   function isPointOnCat(point) {
@@ -772,12 +737,10 @@
     if (game.isPaused || !isPointOnCat(point)) return false;
     clearCaregiverPauseTimer();
     caregiverPausePointerId = pointerId;
-    game.caregiverPauseStartedAt = nowMs();
     caregiverPauseTimer = window.setTimeout(() => {
       caregiverPauseTimer = null;
       caregiverPausePointerId = null;
-      game.caregiverPauseStartedAt = 0;
-      pauseGame("caregiver");
+      pauseGame();
     }, CAREGIVER_PAUSE_HOLD_MS);
     return true;
   }
@@ -787,16 +750,15 @@
     autoPauseTimer = window.setTimeout(() => {
       autoPauseTimer = null;
       if (document.hidden || reason === "pagehide") {
-        pauseGame(reason);
+        pauseGame();
       }
     }, AUTO_PAUSE_GRACE_MS);
   }
 
-  function pauseGame(reason = "visibility") {
+  function pauseGame() {
     clearCaregiverPauseTimer();
     if (game.isPaused) return;
     game.isPaused = true;
-    game.pauseReason = reason;
     game.pausedAt = nowMs();
     audio.pause();
 
@@ -812,7 +774,6 @@
     if (!game.isPaused) return;
     clearAutoPauseTimer();
     game.isPaused = false;
-    game.pauseReason = "";
     lastFrame = nowMs();
     audio.start();
 
@@ -901,15 +862,14 @@
       segment: 0,
       distanceOnSegment: 0,
       x: target.path[0].x,
-      y: target.path[0].y,
-      startedAt: nowMs()
+      y: target.path[0].y
     };
     game.phase = "shooting";
     game.shotsTaken += 1;
   }
 
   /***************************************************************************
-   * 10. Shot movement and resolution
+   * 11. Shot movement and resolution
    ***************************************************************************/
 
   function updateShot(dt) {
@@ -945,80 +905,48 @@
 
   function resolveShot() {
     const shot = game.shot;
-    if (!shot) {
-      game.phase = "playing";
-      return;
-    }
-
     const target = shot.target;
+    setCell(target.row, target.col, { color: shot.color });
+
+    const cluster = connectedSameColorFromVirtual(target.row, target.col, shot.color);
     let clearedAny = false;
-    let builtSameColorCluster = false;
+    let floating = [];
 
-    try {
-      setCell(target.row, target.col, { color: shot.color });
-
-      const cluster = connectedSameColorFromVirtual(target.row, target.col, shot.color);
-      builtSameColorCluster = cluster.length >= 2;
-
-      if (cluster.length >= 3) {
-        clearedAny = true;
-        const floating = floatingAfterVirtualRemoval(cluster);
-        removeCellsWithPop(cluster, "pop");
-        if (floating.length) removeCellsWithPop(floating, "float");
-        safePop(cluster.length + floating.length);
-      }
-    } catch (error) {
-      console.warn("Shot resolution recovered after error:", error);
-    } finally {
-      game.shot = null;
-      game.aimPath = [];
+    if (cluster.length >= 3) {
+      clearedAny = true;
+      floating = floatingAfterVirtualRemoval(cluster);
+      removeCellsWithPop(cluster, "pop");
+      if (floating.length) removeCellsWithPop(floating, "float");
+      audio.pop(cluster.length + floating.length);
     }
+
+    game.shot = null;
+    game.aimPath = [];
 
     runNoLoseLowRowClear();
+
+    // Keep the demo in the intended 9-13 shot range. Near the goal, a successful
+    // shot creates a friendly final cascade rather than making the child grind.
+    if (clearedAny && game.shotsTaken >= game.shotGoal && countOccupied() > 0) {
+      const remaining = occupiedCells().map(b => [b.row, b.col]);
+      window.setTimeout(() => {
+        removeCellsWithPop(remaining, "pop");
+        audio.pop(Math.min(6, remaining.length));
+        window.setTimeout(startCelebration, 650);
+      }, 360);
+      game.phase = "finishing";
+      return;
+    }
 
     if (countOccupied() === 0) {
       startCelebration();
       return;
     }
 
-    // Keep the demo in the intended 9-13 shot range. Near the goal, a successful
-    // shot creates a friendly final cascade rather than making the child grind.
-    if (clearedAny && game.shotsTaken >= game.shotGoal && countOccupied() > 0) {
-      beginFinalCascade();
-      return;
-    }
-
+    const builtSameColorCluster = cluster.length >= 2;
     updateGuaranteedHitState(clearedAny, builtSameColorCluster);
     game.loadedColor = chooseHelpfulBubbleColor(game.nextGuaranteedHit);
     game.phase = "playing";
-  }
-
-  function beginFinalCascade() {
-    clearFinalCascadeTimers();
-    game.phase = "finishing";
-    game.finalCascadeStartedAt = nowMs();
-
-    // Failsafe: the game should never remain in the finishing animation state.
-    game.finalCascadeFallbackTimer = window.setTimeout(() => {
-      if (game.phase === "finishing") startCelebration();
-    }, 2200);
-
-    game.finalCascadeTimer = window.setTimeout(() => {
-      game.finalCascadeTimer = null;
-      try {
-        const remaining = occupiedCells().map(b => [b.row, b.col]);
-        if (remaining.length) {
-          removeCellsWithPop(remaining, "pop");
-          safePop(Math.min(6, remaining.length));
-        }
-      } catch (error) {
-        console.warn("Final cascade animation recovered after error:", error);
-      }
-
-      window.setTimeout(() => {
-        if (game.phase === "finishing") startCelebration();
-      }, 650);
-    }, 360);
   }
 
   function removeCellsWithPop(cells, type) {
@@ -1084,17 +1012,16 @@
     }
     if (cells.length) {
       removeCellsWithPop(cells, "float");
-      safePop(Math.min(5, cells.length));
+      audio.pop(Math.min(5, cells.length));
     }
   }
 
   function startCelebration() {
-    clearFinalCascadeTimers();
     game.phase = "celebration";
     game.celebrationStartedAt = nowMs();
     game.shot = null;
     game.aimPath = [];
-    safeCelebrateSound();
+    audio.celebrate();
 
     for (let i = 0; i < 90; i += 1) {
       const color = pick(BUBBLE_COLORS);
@@ -1120,7 +1047,7 @@
   }
 
   /***************************************************************************
-   * 11. Animation effects
+   * 12. Animation effects
    ***************************************************************************/
 
   function makeSparkles(x, y, color, count) {
@@ -1153,7 +1080,7 @@
   }
 
   /***************************************************************************
-   * 12. Rendering
+   * 13. Rendering
    ***************************************************************************/
 
   function drawBackground() {
@@ -1755,7 +1682,7 @@
   }
 
   /***************************************************************************
-   * 13. Main update/render loop
+   * 14. Main update/render loop
    ***************************************************************************/
 
   let lastFrame = nowMs();
@@ -1764,13 +1691,6 @@
     if (game.isPaused) {
       lastFrame = current;
       return;
-    }
-
-    if (game.phase === "shooting" && !game.shot) {
-      game.phase = "playing";
-    }
-    if (game.phase === "finishing" && game.finalCascadeStartedAt && current - game.finalCascadeStartedAt > 2600) {
-      startCelebration();
     }
 
     const dt = clamp((current - lastFrame) / 1000, 0, 0.033);
@@ -1808,7 +1728,7 @@
   }
 
   /***************************************************************************
-   * 14. Boot
+   * 15. Boot
    ***************************************************************************/
 
   resize();
